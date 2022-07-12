@@ -1,13 +1,12 @@
 #@auto-fold regex /./
-import hmac, hashlib, time, requests, base64, pandas as pd, sys
+import hmac, hashlib, time, requests, base64, pandas as pd, sys,json
+from python_helpers import python_helper as ph
+from python_helpers import google_helper as gh
 from requests.auth import AuthBase
-sys.path.insert(0,'C:/Finance/projects')
-import env,json
 
-items = []
 baseURL = 'https://api.pro.coinbase.com/'
-creds = json.load(open(r'C:\Finance\projects\personal\creds.json')).get('coinbase')
-base_creds = creds.get('portfolio_1')
+creds = json.load(open(ph.root_fp+'/creds/creds.json')).get('coinbase')
+
 
 # Create custom authentication for Exchange
 class CoinbaseExchangeAuth(AuthBase):
@@ -32,51 +31,56 @@ class CoinbaseExchangeAuth(AuthBase):
         })
         return request
 
-def get_profiles():
+def request(end_point:str, cred:json):
+    resp=requests.get(baseURL+end_point, auth=CoinbaseExchangeAuth(cred.get('api_key'),cred.get('secret_key'),cred.get('passphrase')))
+    return resp.json()
+
+def get_profiles(cred):
     """Return active profiles"""
+    cred = creds.get('portfolio_1')
     profiles =[]
-    for item in request('profiles',base_creds.get('api_key'),
-                    base_creds.get('secret_key'), base_creds.get('passphrase')):
+    for item in request('profiles', cred):
         if item['active'] == True:
              profiles.append([item['id'],item['name']])
     return profiles
 
-def request(end_point, api_key,secret_key,passphrase):
-    resp=requests.get(baseURL+end_point, auth=CoinbaseExchangeAuth(api_key,secret_key,passphrase))
-    return resp.json()
-
-def get_ids():
+def get_ids(cred):
     """Get a list of product ids"""
     ids = []
-    for i in list(request('accounts',base_creds.get('api_key'),
-                    base_creds.get('secret_key'),base_creds.get('passphrase') )):
+    for i in list(request('accounts', cred)):
         ids.append(i['currency']+'-EUR')
         ids.append(i['currency']+'-GBP')
     return ids
 
-def get_fills():
+def get_fills(cred):
     """Get a list of transactions"""
-    for folio in creds: #loop through all portfolio
-        for product in get_ids():   #loop through all product_ids
-            print("Geting data for {} using {}.".format(product,folio))
-            time.sleep(1)
-            for item in request('fills?product_id={}'.format(product),creds.get(folio).get('api_key')
-                                ,creds.get(folio).get('secret_key'),creds.get(folio).get('passphrase')): #
-                if 'message' not in item:
-                    if item:
-                        items.append(item)
-    return items
+    # TODO: find a smart way to get fills, that doesn't require querying every product combo
+    transactions = []
+    products = get_ids(cred)
+    for product in products:   #loop through all product_ids
+        print("Geting transactions for {}".format(product))
+        time.sleep(1)
+        for line in request('fills?product_id={}'.format(product),cred): #
+            if 'message' not in line:
+                if line:
+                    transactions.append(line)
+    return transactions
 
-def transform():
+def transform(cred):
     """Transform data and export to google sheets"""
-    df = pd.json_normalize(get_fills())
-    df[['ticker','currency']] = df.product_id.str.split('-',expand=True)
-    for i in  get_profiles():
-        df.loc[df.profile_id == i[0], ['profile_id']] = i[1]
-    df['load_date']= pd.Timestamp.now().strftime('%Y-%m-%d  %H:%M:%S')
-    df.created_at=pd.to_datetime(df.created_at).dt.strftime('%Y-%m-%d  %H:%M:%S')
-    df = df.sort_values(['created_at'], ascending=True )
-    env.rep_data_sh(df,'18HjRhb8maIt0ypGxSAmjz592_1oQZqEN0f915RlGsjw','Crypto: Data')
-    return "Coinbase job completed successfully"
+    df = pd.DataFrame()
+    profiles = get_profiles(creds)
+    for key,value in creds.items():
+        print('executing transform for'+ key)
+        df = df.append(pd.json_normalize(get_fills(value)))
+        df[['ticker','currency']] = df.product_id.str.split('-',expand=True)
+        for i in  profiles:
+            df.loc[df.profile_id == i[0], ['profile_id']] = i[1]
+        df['load_date']= pd.Timestamp.now().strftime('%Y-%m-%d  %H:%M:%S')
+        df.created_at = pd.to_datetime(df.created_at)
+        # df.created_at = pd.to_datetime(df.created_at).dts.strftime('%Y-%m-%d  %H:%M:%S')
+        df = df.sort_values(['created_at'], ascending=True )
+    gh.rep_data_sh(df,'18HjRhb8maIt0ypGxSAmjz592_1oQZqEN0f915RlGsjw','Crypto: Data')
+    return [df,"Coinbase job completed successfully"]
 
-results = transform()
+results = transform(creds)
